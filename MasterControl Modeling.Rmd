@@ -1,0 +1,549 @@
+---
+title: "Modeling Assignment"
+date: "2026-03-18"
+output: html_document
+---
+
+# Introduction
+
+The goal of this project is to identify accounts, industries, and company characteristics with a higher likelihood of converting for the Mx product in order to provide MasterControl with a clear and actionable recommendation that describes which account types and job titles convert the best for the Mx product, how this differs from the Qx's optimal profile, and the expected impact. We must analyze the relationship between the predictor variables in the sales leads dataset and identify drivers that represent Mx's target customers.
+
+The purpose of this Modeling notebook is to explore different models to analyze and identify predictors among MasterControl's customer base that improve its current conversion rate baseline, and bridge the performance gap between Qx and Mx. 
+
+# Gaurav's Packages and Data Import
+```{r Packages and Data Import}
+# Packages
+suppressMessages(suppressWarnings({
+library(tidyverse)
+library(caret)
+library(RWeka)
+library(dplyr)
+library(knitr)
+library(lubridate)
+library(readr)
+library(rpart)
+library(rpact)
+library(dplyr)
+library(lightgbm)
+library(grf)
+library(forcats)
+library(pROC)
+library(ranger)
+library(rpart.plot)}))
+
+# Import Data
+QAL_Perform <- read_csv("Mastercontrol QAL Performance.csv")
+```
+
+# Gaurav's Examine Data and Clean Data
+```{r Data Examination}
+# Quick Look
+QAL_Perform |>str()
+QAL_Perform |> summary()
+
+# Check for Missing Values
+sort(colSums(is.na(QAL_Perform)))
+```
+
+# Gaurav's Factor Data
+```{r Factor}
+QAL_Perform_f <- QAL_Perform |>
+  mutate(across(where(is.character), as.factor))
+QAL_Perform_f
+```
+
+# Gaurav's Target Variable 
+```{r Conversion Variable}
+# Create Logical Variable
+QAL_Model <- QAL_Perform_f |>
+  filter(!is.na(next_stage__c)) |>
+  mutate(
+    progressed = factor(
+      if_else(next_stage__c %in% c("SQL", "SQO", "Won"), "Yes", "No"),
+      levels = c("No", "Yes")))
+
+# Overall Conversion Rate
+ov_conv_rate <- mean(QAL_Model$progressed == "Yes", na.rm = TRUE)
+ov_conv_rate
+```
+
+# Gaurav's Convert NA's to Missing
+```{r}
+# Convert NAs to "Missing"
+QAL_Model <- QAL_Model |>
+  mutate(across(where(is.factor), ~fct_na_value_to_level(., level = "Missing")))
+
+# Verify
+colSums(is.na(QAL_Model))
+```
+# Feature Engineering
+```{r}
+QAL_Model <- QAL_Model |>
+  mutate(
+    # Date features
+    cohort_year    = year(`qal cohort date`),
+    cohort_quarter = quarter(`qal cohort date`),
+    
+    # Title lowercase helper
+    title_lower = str_to_lower(as.character(`contact/lead title`)),
+    
+    # Seniority
+   seniority = case_when(
+      `contact/lead title` == "Missing"                                       ~ "Unknown",
+      str_detect(title_lower, "chief|\\bceo\\b|\\bcoo\\b|\\bcfo\\b|\\bcto\\b|president|\\bowner\\b") ~ "C-Level",
+      str_detect(title_lower, "\\bvp\\b|vice president|\\bsvp\\b|\\bevp\\b") ~ "VP",
+      str_detect(title_lower, "\\bdirector\\b")                               ~ "Director",
+      str_detect(title_lower, "\\bmanager\\b")                                ~ "Manager",
+      str_detect(title_lower, "senior|\\bsr\\b|\\blead\\b|principal")         ~ "Senior/Lead",
+      TRUE                                                                     ~ "Other"
+    ),
+    seniority = factor(seniority),
+   
+   # Functional Area
+    func_area = case_when(
+      `contact/lead title` == "Missing"                                  ~ "Unknown",
+      str_detect(title_lower, "quality|\\bqa\\b|\\bqc\\b|compliance|regulatory") ~ "Quality/Regulatory",
+      str_detect(title_lower, "manufactur|operations|production|supply") ~ "Operations/Manufacturing",
+      str_detect(title_lower, "\\bit\\b|information tech|systems|software|digital") ~ "IT/Systems",
+      str_detect(title_lower, "research|science|scientist|\\br&d\\b|lab") ~ "R&D/Science",
+      TRUE                                                               ~ "Other"
+    ),
+    func_area = factor(func_area))
+
+# Verify
+table(QAL_Model$seniority)
+table(QAL_Model$func_area)
+```
+
+# Splitting Converstion Rate by Variables
+```{r}
+# Industry
+industry_summary <- QAL_Model |>
+  group_by(`acct target industry`, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, desc(conv_rate))
+
+print(industry_summary)
+
+# Manufacturing Model
+mfg_summary <- QAL_Model |>
+  group_by(`acct manufacturing model`, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, desc(conv_rate))
+
+print(mfg_summary)
+
+# Site Function
+site_summary <- QAL_Model |>
+  group_by(`acct primary site function`, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, desc(conv_rate)) |>
+  filter(total >= 20)
+
+print(site_summary)
+
+# Company Tier
+tier_summary <- QAL_Model |>
+  group_by(`acct tier rollup`, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, desc(conv_rate))
+
+print(tier_summary)
+
+# Territory
+territory_summary <- QAL_Model |>
+  group_by(`acct territory rollup`, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, desc(conv_rate))
+
+print(territory_summary)
+
+# Priority
+priority_summary <- QAL_Model |>
+  group_by(Priority, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, desc(conv_rate))
+
+print(priority_summary)
+
+# Channel
+channel_summary <- QAL_Model |>
+  group_by(`last tactic campaign channel`, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, desc(conv_rate))
+
+print(channel_summary)
+
+# Cohort Year
+year_summary <- QAL_Model |>
+  group_by(cohort_year, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, cohort_year)
+
+print(year_summary)
+
+# Cohort Quarter
+quarter_summary <- QAL_Model |>
+  group_by(cohort_year, cohort_quarter, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, cohort_year, cohort_quarter)
+
+print(quarter_summary)
+
+# Seniority
+seniority_summary <- QAL_Model |>
+  group_by(seniority, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, desc(conv_rate))
+
+print(seniority_summary)
+
+# Functional Area
+func_summary <- QAL_Model |>
+  group_by(func_area, solution_rollup) |>
+  summarise(
+    total       = n(),
+    conversions = sum(progressed == "Yes"),
+    conv_rate   = round(mean(progressed == "Yes") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(solution_rollup, desc(conv_rate))
+
+print(func_summary)
+```
+Based on the above conversion rates, Blood and Biologics and Medical Devices have the highest Mx Conversion rates (17.0% and 16.3%) in terms of Industry. When split by manufacturing model, Consumer Packaged goods had the best Mx conversion rate (27%). When split by Site Function, Radio pharmaceuticals had the highest Mx Conversion Rate (32.4%). When split by territory, Japan (23.1%) and the Americas (15.0%) h ad the best conversion rates. In Priority split, the conversion rates that were highest were Website Pricing (60%), Discount Offer (50%), Video Demo (31.1%), and Contact Us (30.1%). In seniority, the C-Level (19.6%), VP (17.9%), and Senior/Lead (16.0%) had the best conversion rate. MasterControl also tended to do better with smaller companies and with channels SEO (27.2%), Direct/Inbound (24.7%), and Events (21.9%).
+
+# Charlotte's Mx Logistic Regression
+```{r Logistic Regression}
+# CV control
+cv_control <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = TRUE)
+
+# Filter to Mx 
+Mx_Model <- QAL_Model |>
+  filter(solution_rollup == "Mx") |>
+  mutate(progressed = droplevels(progressed))
+
+cat("Mx records:", nrow(Mx_Model), "\n")
+cat("Mx conversion rate:", round(mean(Mx_Model$progressed == "Yes") * 100, 1), "%\n")
+
+# Train/test split (80/20)
+set.seed(123)
+train_index <- createDataPartition(Mx_Model$progressed, p = 0.8, list = FALSE)
+Mx_train <- Mx_Model[train_index, ]
+Mx_test  <- Mx_Model[-train_index, ]
+
+cat("Training set:", nrow(Mx_train), "records\n")
+cat("Test set:", nrow(Mx_test), "records\n")
+
+# Logistic regression model
+Mx_logit <- train(
+  progressed ~ 
+    `acct target industry` +
+    `acct manufacturing model` +
+    `acct tier rollup` +
+    `acct territory rollup` +
+    Priority +
+    `last tactic campaign channel` +
+    seniority +
+    func_area +
+    cohort_year +
+    cohort_quarter,
+  data      = Mx_train,
+  method    = "glm",
+  family    = "binomial",
+  trControl = cv_control,
+  metric    = "ROC")
+
+Mx_logit
+```
+
+# Charlotte's Mx Random Forest
+```{r Random Forest}
+# Random Forest Model
+Mx_rf <- train(
+  progressed ~ 
+    `acct target industry` +
+    `acct manufacturing model` +
+    `acct tier rollup` +
+    `acct territory rollup` +
+    Priority +
+    `last tactic campaign channel` +
+    seniority +
+    func_area +
+    cohort_year +
+    cohort_quarter,
+  data      = Mx_train,
+  method    = "rf",
+  trControl = cv_control,
+  metric    = "ROC",
+  ntree     = 500)
+
+Mx_rf
+```
+
+# Charlotte's Gradient Boosted Model
+```{r Gradient Boosted Model}
+# GBM
+Mx_gbm <- train(
+  progressed ~ 
+    `acct target industry` +
+    `acct manufacturing model` +
+    `acct tier rollup` +
+    `acct territory rollup` +
+    Priority +
+    `last tactic campaign channel` +
+    seniority +
+    func_area +
+    cohort_year +
+    cohort_quarter,
+  data      = Mx_train,
+  method    = "gbm",
+  trControl = cv_control,
+  metric    = "ROC",
+  verbose   = FALSE)
+
+Mx_gbm
+```
+
+# Alina's Qx Random Forest
+```{r Qx Random Forest}
+# RF
+Qx_Model <- QAL_Model |>
+  filter(solution_rollup == "Qx") |>
+  mutate(progressed = droplevels(progressed))
+set.seed(123)
+train_index_qx <- createDataPartition(Qx_Model$progressed, p = 0.8, list = FALSE)
+Qx_train <- Qx_Model[train_index_qx, ]
+Qx_test  <- Qx_Model[-train_index_qx, ]
+
+cv_control_down <- trainControl(
+  method          = "repeatedcv",
+  number          = 10,
+  repeats         = 3,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = TRUE,
+  sampling        = "down"
+)
+
+# Train
+Qx_rf <- train(
+  progressed ~ 
+    `acct target industry` +
+    `acct manufacturing model` +
+    `acct tier rollup` +
+    `acct territory rollup` +
+    Priority +
+    `last tactic campaign channel` +
+    seniority +
+    func_area +
+    cohort_year +
+    cohort_quarter,
+  data      = Qx_train,
+  method    = "ranger",
+  metric    = "ROC",
+  trControl = cv_control_down,
+  tuneGrid  = expand.grid(
+    mtry           = c(2, 3, 5, 7),
+    splitrule      = "gini",
+    min.node.size  = c(5, 10, 20, 50)
+  ),
+  importance = "impurity"
+)
+print(Qx_rf)
+```
+
+# Alina's Qx Logistic Regression
+```{r Qx Logistic Regression}
+Qx_logit <- train(
+  progressed ~ 
+    `acct target industry` +
+    `acct manufacturing model` +
+    `acct tier rollup` +
+    `acct territory rollup` +
+    Priority +
+    `last tactic campaign channel` +
+    seniority +
+    func_area +
+    cohort_year +
+    cohort_quarter,
+  data      = Qx_train,
+  method    = "glm",
+  family    = "binomial",
+  trControl = cv_control,
+  metric    = "ROC"
+)
+
+Qx_logit
+```
+# Alina's Mx Logistic Regression
+```{r Alina's Logit Model}
+# Logistic Regression Mx (with class weights and repeated CV)
+
+# Repeated 10-fold CV control with class weights
+cv_control_weighted <- trainControl(
+  method          = "repeatedcv",
+  number          = 10,
+  repeats         = 3,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = TRUE
+)
+
+# Class weights to handle imbalance
+weight_ratio_mx <- round(sum(Mx_train$progressed == "No") / sum(Mx_train$progressed == "Yes"))
+weights_mx <- ifelse(Mx_train$progressed == "Yes", weight_ratio_mx, 1)
+
+# Collapse rare factor levels (her approach)
+Mx_train_weighted <- Mx_train |>
+  mutate(
+    `acct manufacturing model`     = fct_lump_min(`acct manufacturing model`, min = 30, other_level = "Other"),
+    `acct territory rollup`        = fct_lump_min(`acct territory rollup`, min = 30, other_level = "Other"),
+    `last tactic campaign channel` = fct_lump_min(`last tactic campaign channel`, min = 30, other_level = "Other"),
+    `acct target industry`         = fct_lump_min(`acct target industry`, min = 30, other_level = "Other"),
+    Priority                       = fct_lump_min(Priority, min = 30, other_level = "Other"),
+    seniority                      = fct_lump_min(seniority, min = 30, other_level = "Other")
+  )
+
+# Train
+Mx_logit_weighted <- train(
+  progressed ~ 
+    `acct target industry` +
+    `acct manufacturing model` +
+    `acct tier rollup` +
+    `acct territory rollup` +
+    Priority +
+    `last tactic campaign channel` +
+    seniority +
+    func_area +
+    cohort_year +
+    cohort_quarter,
+  data      = Mx_train_weighted,
+  method    = "glm",
+  family    = "binomial",
+  weights   = weights_mx,
+  trControl = cv_control_weighted,
+  metric    = "ROC"
+)
+
+Mx_logit_weighted
+summary(Mx_logit_weighted$finalModel)
+```
+
+# Leilanie's Decision Tree
+```{r Decision Tree}
+Mx_train_dt <- Mx_train |>
+  mutate(across(where(is.factor), droplevels)) |>
+  rename(
+    industry    = `acct target industry`,
+    mfg_model   = `acct manufacturing model`,
+    tier        = `acct tier rollup`,
+    territory   = `acct territory rollup`,
+    channel     = `last tactic campaign channel`
+  )
+
+set.seed(123)
+Mx_dt <- train(
+  progressed ~ 
+    industry +
+    mfg_model +
+    tier +
+    territory +
+    Priority +
+    channel +
+    seniority +
+    func_area +
+    cohort_year +
+    cohort_quarter,
+  data       = Mx_train_dt,
+  method     = "rpart",
+  trControl  = cv_control,
+  metric     = "ROC",
+  tuneLength = 10
+)
+
+Mx_dt
+
+# Plot
+rpart.plot(Mx_dt$finalModel, type = 4, extra = 101, under = TRUE,
+           cex = 0.7, main = "Decision Tree for Mx Conversion")
+
+# Evaluate on test
+dt_preds <- predict(Mx_dt, Mx_test)
+dt_probs <- predict(Mx_dt, Mx_test, type = "prob")[, "Yes"]
+
+confusionMatrix(dt_preds, Mx_test$progressed, positive = "Yes")
+roc(Mx_test$progressed, dt_probs, levels = c("No", "Yes")) |> auc()
+
+varImp(Mx_dt) |> plot(main = "Decision Tree: Variable Importance for Mx Conversion")
+```
+
+# Results
+
+The analysis used 16,060 MasterControl sales leads split into Mx and Qx datasets (4,040 and 12,020, respectively). All categorical predictors were factored and rare levels under 30 observations were collapse in an "Other" category to prevent convergence failures. Class imbalance was addressed by doing class weights for the logistic regression models and downsampling for the random forest models.
+
+The Gradient Boosted Tree for Mx had the best AUC of about 0.823 with the Logistic Regression for Mx also performing well at about 0.816, so we went with the logistic regression model due to better interpretability.
+
+Key findings for the Mx logistic regression coefficients
+- Priority 2 leads had the highest negative signal (-1.47), meaning that it should be deprioritize and instead focus on Website Pricing (+2.03) and Contact Us (+0.79) which have significantly higher odds of converting.
+- External Demand Gen (-1.95), Email (-1.08), and Events (-1.07) are all strongly negative and statistically significant. MasterControl may be spending too heavily on channels that underperform for Mx.
+- No account type is statistically significant in the Mx model besides non-manufacturing which is strongly negative (-1.38). 
+- Medium (+0.32) and small (+0.34) account tiers convert significantly better than large accounts. Mx may be better positioned as a mid-market product than an enterprise solution.
+- Targeting manager and executive titles within the medical device manufacturing sector could improve Mx's conversion rate since they both show high model scores.
+
+All parts of the notebook were worked on by all members of the group even if not explicitly written. 
